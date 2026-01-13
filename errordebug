@@ -1,70 +1,42 @@
-import json
-import boto3
-import urllib3
-from base64 import b64encode
+"case tables": [
 
-http = urllib3.PoolManager()
+"name": "promin case data",
+"label": "Promin Case Data"
 
-secrets = boto3.client("secretsmanager")
-secret = json.loads(
-    secrets.get_secret_value(SecretId="awshealthintegrationsuser")["SecretString"]
-)
+"name": "sys_rte_eb_upper_case_trim_operation",
+"label": "Robust Transform Engine Entity Upper Case Trim Operation"
 
-SNOW_INSTANCE = secret["SNOW_INSTANCE"]
-SNOW_USER = secret["SNOW_USER"]
-SNOW_PASSWORD = secret["SNOW_PASSWORD"]
+1.
 
-AUTH = b64encode(f"{SNOW_USER}:{SNOW_PASSWORD}".encode()).decode()
-HEADERS = {
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-    "Authorization": f"Basic {AUTH}"
-}
+"name": "ml_capability_definition_case_detail",
+"label": "Process Mining Transition Case Detail Definition"
 
-def handler(event, context):
-    # Step 1: Find case tables
-    response = http.request(
-        'GET',
-        f"{SNOW_INSTANCE}/api/now/table/sys_db_object?sysparm_query=nameLIKEcase^ORlabelLIKEcase&sysparm_fields=name,label",
-        headers=HEADERS
-    )
-   
-    tables_data = json.loads(response.data.decode('utf-8'))
-   
-    # Step 2: Check user roles
-    user_response = http.request(
-        'GET',
-        f"{SNOW_INSTANCE}/api/now/table/sys_user?sysparm_query=user_name={SNOW_USER}&sysparm_fields=sys_id",
-        headers=HEADERS
-    )
-   
-    user_data = json.loads(user_response.data.decode('utf-8'))
-    user_sys_id = user_data['result'][0]['sys_id'] if user_data.get('result') else None
-   
-    roles = []
-    if user_sys_id:
-        roles_response = http.request(
-            'GET',
-            f"{SNOW_INSTANCE}/api/now/table/sys_user_has_role?sysparm_query=user={user_sys_id}&sysparm_fields=role.name",
-            headers=HEADERS
-        )
-        roles_data = json.loads(roles_response.data.decode('utf-8'))
-        roles = [r.get('role', {}).get('name') for r in roles_data.get('result', [])]
-   
-    # Step 3: Try creating a case
-    case_payload = {"short_description": "Test"}
-    case_response = http.request(
-        'POST',
-        f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case",
-        headers=HEADERS,
-        body=json.dumps(case_payload)
-    )
-   
-    case_result = json.loads(case_response.data.decode('utf-8'))
-   
-    return {
-        "case_tables": tables_data.get('result', []),
-        "user_roles": roles,
-        "case_creation_status": case_response.status,
-        "case_creation_response": case_result
-    }
+"name": "promin case_record",
+"label": "Case Record"
+
+"name": "automation_pipeline_transformer_ppid special case",
+"label": "Pipeline Transformer: PPID Special Case"
+
+"name": "sn customerservice case",
+"label": "Case"
+
+"name": "promin transition case detail",
+"label": "Promin Transition Case Detail"
+
+"name": "sn_customerservice_sf_case",
+"label": "Customer Service Case Flow"
+"name": "sn_customerservice_case_report",
+"label": "Case Report"
+
+"name": "sys_rte_eb_upper_case_operation",
+"label": "Robust Transform Engine Entity Upper Case Operation"
+
+1,
+"user_roles": [],
+"case_creation_status": 403,
+"case_creation_response": {
+"error": {
+"message": "Operation Failed",
+"detail": "ACL Exception Insert Failed due to security constraints"
+
+"status": "failure"
