@@ -1,0 +1,297 @@
+import json
+import boto3
+import urllib3
+from base64 import b64encode
+
+http = urllib3.PoolManager()
+
+secrets = boto3.client("secretsmanager")
+secret = json.loads(
+    secrets.get_secret_value(SecretId="awshealthintegrationsuser")["SecretString"]
+)
+
+SNOW_INSTANCE = secret["SNOW_INSTANCE"]
+SNOW_USER = secret["SNOW_USER"]
+SNOW_PASSWORD = secret["SNOW_PASSWORD"]
+
+AUTH = b64encode(f"{SNOW_USER}:{SNOW_PASSWORD}".encode()).decode()
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "Authorization": f"Basic {AUTH}"
+}
+
+NORMAL_CHANGE_MODEL_SYS_ID = "your_actual_sys_id_here"  # Replace with your change model sys_id
+ASSIGNMENT_GROUP_SYS_ID = "your_group_sys_id_here"      # Replace with your assignment group sys_id
+
+def check_existing_case(correlation_id):
+    """Check if a case already exists for this event"""
+    try:
+        response = http.request(
+            'GET',
+            f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case?sysparm_query=correlation_id={correlation_id}&sysparm_fields=number,sys_id,state",
+            headers=HEADERS
+        )
+        data = json.loads(response.data.decode('utf-8'))
+        if data.get('result') and len(data['result']) > 0:
+            return data['result'][0]
+        return None
+    except Exception as e:
+        print(f"Error checking for existing case: {str(e)}")
+        return None
+
+def check_existing_change(correlation_id):
+    """Check if a change already exists for this event"""
+    try:
+        response = http.request(
+            'GET',
+            f"{SNOW_INSTANCE}/api/now/table/change_request?sysparm_query=correlation_id={correlation_id}&sysparm_fields=number,sys_id,state",
+            headers=HEADERS
+        )
+        data = json.loads(response.data.decode('utf-8'))
+        if data.get('result') and len(data['result']) > 0:
+            return data['result'][0]
+        return None
+    except Exception as e:
+        print(f"Error checking for existing change: {str(e)}")
+        return None
+
+def handler(event, context):
+    try:
+        # Extract all AWS Health event details
+        detail = event.get("detail", {})
+        
+        event_arn = detail.get("eventArn", "")
+        event_type_code = detail.get("eventTypeCode", "")
+        event_type_category = detail.get("eventTypeCategory", "")
+        service = detail.get("service", "")
+        region = detail.get("eventRegion", "")
+        start_time = detail.get("startTime", "")
+        end_time = detail.get("endTime", "")
+        last_updated_time = detail.get("lastUpdatedTime", "")
+        status_code = detail.get("statusCode", "")
+        account_id = event.get("account", "Unknown")
+        
+        # Affected entities
+        affected_entities = detail.get("affectedEntities", [])
+        entity_values = [entity.get("entityValue", "") for entity in affected_entities]
+        
+        # Event description
+        event_description = detail.get("eventDescription", [{}])[0].get("latestDescription", "No description available")
+        
+        # Check if event is closed
+        if status_code == "closed":
+            print(f"Event is closed, checking for existing tickets to close")
+            existing_case = check_existing_case(event_arn)
+            existing_change = check_existing_change(event_arn)
+            
+            results = {"status": "event_closed"}
+            
+            if existing_case:
+                print(f"Closing case {existing_case['number']}")
+                close_case_response = http.request(
+                    'PATCH',
+                    f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case/{existing_case['sys_id']}",
+                    headers=HEADERS,
+                    body=json.dumps({
+                        "state": "3",  # Closed
+                        "close_notes": f"AWS Health event resolved at {last_updated_time}",
+                        "work_notes": f"Event closed by AWS Health at {last_updated_time}"
+                    })
+                )
+                results["case_closed"] = existing_case['number']
+            
+            if existing_change:
+                print(f"Closing change {existing_change['number']}")
+                close_change_response = http.request(
+                    'PATCH',
+                    f"{SNOW_INSTANCE}/api/now/table/change_request/{existing_change['sys_id']}",
+                    headers=HEADERS,
+                    body=json.dumps({
+                        "state": "-5",  # Closed (value may vary by instance)
+                        "close_notes": f"AWS Health event resolved at {last_updated_time}",
+                        "work_notes": f"Event closed by AWS Health at {last_updated_time}"
+                    })
+                )
+                results["change_closed"] = existing_change['number']
+            
+            return results
+        
+        # Check for existing tickets (duplicate prevention)
+        existing_case = check_existing_case(event_arn)
+        existing_change = check_existing_change(event_arn)
+        
+        if existing_case and existing_change:
+            print(f"Tickets already exist - Case: {existing_case['number']}, Change: {existing_change['number']}")
+            print(f"Adding update as work notes")
+            
+            update_note = f"AWS Health Event Update ({last_updated_time}):\nStatus: {status_code}\n\n{event_description}"
+            
+            # Update case with work notes
+            http.request(
+                'PATCH',
+                f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case/{existing_case['sys_id']}",
+                headers=HEADERS,
+                body=json.dumps({"work_notes": update_note})
+            )
+            
+            # Update change with work notes
+            http.request(
+                'PATCH',
+                f"{SNOW_INSTANCE}/api/now/table/change_request/{existing_change['sys_id']}",
+                headers=HEADERS,
+                body=json.dumps({"work_notes": update_note})
+            )
+            
+            return {
+                "status": "duplicate_prevented_and_updated",
+                "existing_case": existing_case['number'],
+                "existing_change": existing_change['number'],
+                "event_arn": event_arn
+            }
+        
+        # Build detailed description
+        description = f"""AWS Health Event Details:
+
+Account: {account_id}
+Event Type: {event_type_code}
+Category: {event_type_category}
+Service: {service}
+Region: {region}
+Status: {status_code}
+
+Start Time: {start_time}
+End Time: {end_time}
+Last Updated: {last_updated_time}
+
+Event ARN: {event_arn}
+
+Affected Resources:
+{chr(10).join(['- ' + entity for entity in entity_values]) if entity_values else 'None specified'}
+
+Description:
+{event_description}
+"""
+        
+        # Determine priority based on category
+        if event_type_category == "issue":
+            priority = "2"  # High priority for issues
+            impact = "2"
+            urgency = "2"
+        elif event_type_category == "scheduledChange":
+            priority = "3"  # Medium priority for scheduled changes
+            impact = "3"
+            urgency = "3"
+        else:
+            priority = "4"  # Low priority for other events
+            impact = "3"
+            urgency = "3"
+        
+        # Short description with key details
+        short_desc = f"AWS Health {event_type_category}: {event_type_code} - {service} in {region}"
+        
+        # 1. Create Case
+        case_payload = {
+            "short_description": short_desc[:160],  # ServiceNow field limit
+            "description": description,
+            "priority": priority,
+            "correlation_id": event_arn,
+            "contact_type": "monitoring",
+            "state": "1",  # New/Open
+            "assignment_group": ASSIGNMENT_GROUP_SYS_ID
+        }
+        
+        print("Creating case...")
+        case_response = http.request(
+            'POST',
+            f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case",
+            headers=HEADERS,
+            body=json.dumps(case_payload)
+        )
+        
+        print(f"Case response status: {case_response.status}")
+        case_data = json.loads(case_response.data.decode('utf-8'))
+        
+        if case_response.status != 201:
+            return {
+                "error": "Failed to create case",
+                "status": case_response.status,
+                "response": case_data
+            }
+        
+        case_sys_id = case_data["result"]["sys_id"]
+        case_number = case_data["result"]["number"]
+        print(f"Case created: {case_number} ({case_sys_id})")
+        
+        # 2. Create Change
+        change_payload = {
+            "type": "normal",
+            "short_description": short_desc[:160],
+            "description": description,
+            "correlation_id": event_arn,
+            "justification": f"AWS Health event detected for {service} resources in account {account_id}",
+            "impact": impact,
+            "urgency": urgency,
+            "risk": "medium" if event_type_category == "issue" else "low",
+            "category": "Cloud",
+            "start_date": start_time if start_time else None,
+            "end_date": end_time if end_time else None,
+            "assignment_group": ASSIGNMENT_GROUP_SYS_ID
+        }
+        
+        # Only include chg_model if you have a valid sys_id
+        if NORMAL_CHANGE_MODEL_SYS_ID and NORMAL_CHANGE_MODEL_SYS_ID != "your_actual_sys_id_here":
+            change_payload["chg_model"] = NORMAL_CHANGE_MODEL_SYS_ID
+        
+        print("Creating change request...")
+        chg_response = http.request(
+            'POST',
+            f"{SNOW_INSTANCE}/api/now/table/change_request",
+            headers=HEADERS,
+            body=json.dumps(change_payload)
+        )
+        
+        print(f"Change response status: {chg_response.status}")
+        chg_data = json.loads(chg_response.data.decode('utf-8'))
+        
+        if chg_response.status != 201:
+            return {
+                "error": "Failed to create change",
+                "status": chg_response.status,
+                "response": chg_data
+            }
+        
+        change_sys_id = chg_data["result"]["sys_id"]
+        change_number = chg_data["result"]["number"]
+        print(f"Change created: {change_number} ({change_sys_id})")
+        
+        # 3. Link Case to Change
+        print("Linking case to change...")
+        try:
+            link_response = http.request(
+                'PATCH',
+                f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case/{case_sys_id}",
+                headers=HEADERS,
+                body=json.dumps({"watch_list": change_number})
+            )
+            print(f"Link response status: {link_response.status}")
+        except Exception as link_error:
+            print(f"Warning: Could not link case to change: {str(link_error)}")
+        
+        return {
+            "status": "success",
+            "case_number": case_number,
+            "case_sys_id": case_sys_id,
+            "change_number": change_number,
+            "change_sys_id": change_sys_id,
+            "event_arn": event_arn
+        }
+        
+    except Exception as e:
+        print(f"ERROR: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
