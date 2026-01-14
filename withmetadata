@@ -7,7 +7,7 @@ http = urllib3.PoolManager()
 
 secrets = boto3.client("secretsmanager")
 secret = json.loads(
-    secrets.get_secret_value(SecretId="user")["SecretString"]
+    secrets.get_secret_value(SecretId="awshealthintegrationsuser")["SecretString"]
 )
 
 SNOW_INSTANCE = secret["SNOW_INSTANCE"]
@@ -21,7 +21,8 @@ HEADERS = {
     "Authorization": f"Basic {AUTH}"
 }
 
-NORMAL_CHANGE_MODEL_SYS_ID = "your_actual_sys_id_here"  # Replace with real sys_id
+NORMAL_CHANGE_MODEL_SYS_ID = "your_actual_sys_id_here"  # Replace with your change model sys_id
+ASSIGNMENT_GROUP_SYS_ID = "your_group_sys_id_here"      # Replace with your assignment group sys_id
 
 def handler(event, context):
     try:
@@ -91,7 +92,8 @@ Description:
             "priority": priority,
             "correlation_id": event_arn,
             "contact_type": "monitoring",
-            "state": "1"  # New/Open
+            "state": "1",  # New/Open
+            "assignment_group": ASSIGNMENT_GROUP_SYS_ID
         }
         
         print("Creating case...")
@@ -128,7 +130,8 @@ Description:
             "risk": "medium" if event_type_category == "issue" else "low",
             "category": "Cloud",
             "start_date": start_time if start_time else None,
-            "end_date": end_time if end_time else None
+            "end_date": end_time if end_time else None,
+            "assignment_group": ASSIGNMENT_GROUP_SYS_ID
         }
         
         # Only include chg_model if you have a valid sys_id
@@ -158,14 +161,13 @@ Description:
         print(f"Change created: {change_number} ({change_sys_id})")
         
         # 3. Link Case to Change (if your instance supports this field)
-        # You may need to adjust the field name based on your ServiceNow configuration
         print("Linking case to change...")
         try:
             link_response = http.request(
                 'PATCH',
                 f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case/{case_sys_id}",
                 headers=HEADERS,
-                body=json.dumps({"watch_list": change_number})  # Or use appropriate linking field
+                body=json.dumps({"watch_list": change_number})
             )
             print(f"Link response status: {link_response.status}")
         except Exception as link_error:
@@ -178,68 +180,6 @@ Description:
             "change_number": change_number,
             "change_sys_id": change_sys_id,
             "event_arn": event_arn
-        }
-        
-    except Exception as e:
-        print(f"ERROR: {str(e)}")
-        import traceback
-        print(traceback.format_exc())
-        return {
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
-        
-        case_sys_id = case_data["result"]["sys_id"]
-        print(f"Case created: {case_sys_id}")
-        
-        # 2. Create Change
-        change_payload = {
-            "type": "normal",
-            "chg_model": NORMAL_CHANGE_MODEL_SYS_ID,
-            "risk": "medium",
-            "short_description": "AWS Health EC2 Event",
-            "description": "Automatically created from AWS Health",
-            "correlation_id": event_arn
-        }
-        
-        print("Creating change request...")
-        chg_response = http.request(
-            'POST',
-            f"{SNOW_INSTANCE}/api/now/table/change_request",
-            headers=HEADERS,
-            body=json.dumps(change_payload)
-        )
-        
-        print(f"Change response status: {chg_response.status}")
-        print(f"Change response body: {chg_response.data.decode('utf-8')}")
-        
-        chg_data = json.loads(chg_response.data.decode('utf-8'))
-        
-        if chg_response.status != 201:
-            return {
-                "error": "Failed to create change",
-                "status": chg_response.status,
-                "response": chg_data
-            }
-        
-        change_sys_id = chg_data["result"]["sys_id"]
-        print(f"Change created: {change_sys_id}")
-        
-        # 3. Link Case → Change (if your ServiceNow supports this relationship)
-        print("Linking case to change...")
-        link_response = http.request(
-            'PATCH',
-            f"{SNOW_INSTANCE}/api/now/table/sn_customerservice_case/{case_sys_id}",
-            headers=HEADERS,
-            body=json.dumps({"u_related_change": change_sys_id})  # Field name might differ
-        )
-        
-        print(f"Link response status: {link_response.status}")
-        
-        return {
-            "status": "ok",
-            "case_sys_id": case_sys_id,
-            "change_sys_id": change_sys_id
         }
         
     except Exception as e:
